@@ -27,59 +27,161 @@ def get_gemini_client_and_models(api_key_param):
         print(f"Gemini client प्रारंभ नहीं किया जा सका। त्रुटि: {e}")
         raise
 
-def generate_alt_text_for_local_image(gemini_client, vision_model_name, image_path, target_languages):
-    if not gemini_client or not vision_model_name:
-        print("ऑल्ट टेक्स्ट जनरेशन के लिए Gemini client या vision_model_name प्रदान नहीं किया गया।")
-        return "Image" # छवि
-    
-    # सुनिश्चित करें कि यदि target_languages खाली है तो कोई त्रुटि न हो
-    primary_language = target_languages[0] if target_languages else "English"
+# converter_logic.py में (extract_images_and_generate_alt_tags फ़ंक्शन के अंदर)
 
-    time.sleep(1.1) # API दर सीमा से बचने के लिए थोड़ा और बढ़ाएँ
-    print(f"स्थानीय छवि के लिए ऑल्ट टेक्स्ट जेनरेट किया जा रहा है: {os.path.basename(image_path)} में {primary_language}...")
-    try:
-        img_pil = Image.open(image_path)
-        prompt_for_alt_text = f"{primary_language} में इस छवि के लिए एक एकल, संक्षिप्त और वर्णनात्मक ऑल्ट टेक्स्ट प्रदान करें, जो HTML img टैग के 'alt' एट्रिब्यूट के लिए उपयुक्त हो। केवल ऑल्ट टेक्स्ट स्ट्रिंग स्वयं आउटपुट करें, बिना किसी अतिरिक्त स्पष्टीकरण, उद्धरण चिह्नों या मार्कडाउन स्वरूपण के। तथ्यात्मक और संक्षिप्त रहें।"
+def extract_images_and_generate_alt_tags(gemini_client, vision_model_name_param, pdf_path, output_images_folder, target_languages):
+    print(f"DEBUG: extract_images_and_generate_alt_tags फ़ंक्शन शुरू हो रहा है PDF: {pdf_path}") # डिबग
+    if not os.path.exists(pdf_path):
+        print(f"PDF नहीं मिला: {pdf_path}.")
+        return []
 
-        actual_vision_model_name = f"models/{vision_model_name}" if not vision_model_name.startswith("models/") else vision_model_name
+    doc = None # doc को पहले None पर सेट करें
+    try: # fitz.open() के लिए try-except ब्लॉक जोड़ें
+        doc = fitz.open(pdf_path)
+    except Exception as e_open:
+        print(f"DEBUG: PDF खोलने में त्रुटि ({pdf_path}): {e_open}")
+        return []
         
-        # सामग्री को parts के रूप में पास करना अधिक विश्वसनीय हो सकता है
-        image_part = types.Part.from_data(img_pil.tobytes(), mime_type=Image.MIME.get(img_pil.format))
-        if not image_part.inline_data.mime_type: # यदि MIME प्रकार PIL से नहीं मिला
-            # फ़ाइल एक्सटेंशन के आधार पर MIME प्रकार का अनुमान लगाएं
-            ext = os.path.splitext(image_path)[1].lower()
-            if ext == ".png":
-                image_part.inline_data.mime_type = "image/png"
-            elif ext in [".jpg", ".jpeg"]:
-                image_part.inline_data.mime_type = "image/jpeg"
-            # आवश्यकतानुसार अन्य प्रकार जोड़ें
+    images_data = []
+    image_extraction_counter = 0
 
-        contents_for_alt_text = [
-            types.Part.from_text(prompt_for_alt_text),
-            image_part
-        ]
+    if not os.path.exists(output_images_folder):
+        os.makedirs(output_images_folder, exist_ok=True)
+    
+    print(f"DEBUG: PDF में पृष्ठों की संख्या: {len(doc)}") # डिबग
 
-        response = gemini_client.models.generate_content(
-            model=actual_vision_model_name,
-            contents=contents_for_alt_text, # अपडेट किया गया
-            generation_config=types.GenerateContentConfig(temperature=0.3)
-        )
-        alt_text = ""
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            alt_text = response.candidates[0].content.parts[0].text.strip().replace('"', '').replace("'", "").replace('\n', ' ').strip()
-        elif hasattr(response, 'text'):
-            alt_text = response.text.strip().replace('"', '').replace("'", "").replace('\n', ' ').strip()
-        else:
-            print(f"ऑल्ट टेक्स्ट निकालने में असमर्थ। प्रतिक्रिया: {response}")
-            alt_text = "Image placeholder - alt text extraction failed"
+    for page_num in range(len(doc)):
+        page_index_for_log = page_num + 1 # लॉगिंग के लिए 1-आधारित सूचकांक
+        print(f"\nDEBUG: पृष्ठ {page_index_for_log} को संसाधित किया जा रहा है...") # डिबग
+        page = doc[page_num]
+        
+        # page.get_images() का उपयोग करके छवियों की सूची प्राप्त करने का प्रयास करें
+        image_list = []
+        try:
+            image_list = page.get_images(full=True)
+        except Exception as e_get_images:
+            print(f"DEBUG: पृष्ठ {page_index_for_log} से get_images() में त्रुटि: {e_get_images}")
+            continue # अगले पृष्ठ पर जाएँ
 
-        print(f"  {os.path.basename(image_path)} के लिए ऑल्ट टेक्स्ट: '{alt_text}'")
-        return alt_text
-    except Exception as e:
-        print(f"{image_path} के लिए ऑल्ट टेक्स्ट जेनरेट करने में त्रुटि: {e}")
-        if hasattr(e, 'response') and hasattr(e.response, 'prompt_feedback'):
-            print(f"प्रॉम्प्ट फीडबैक: {e.response.prompt_feedback}")
-        return f"छवि प्लेसहोल्डर - ऑल्ट टेक्स्ट जेनरेट करने में त्रुटि"
+        print(f"DEBUG: पृष्ठ {page_index_for_log} पर मिली संभावित छवियों की संख्या: {len(image_list)}") # डिबग
+
+        if not image_list:
+            print(f"DEBUG: पृष्ठ {page_index_for_log} पर कोई छवि (get_images द्वारा) नहीं मिली।")
+            # वैकल्पिक तरीका: page.get_drawings() का उपयोग करके चित्र निकालने का प्रयास करें
+            # यह वेक्टर ग्राफिक्स को रास्टराइज़ कर सकता है
+            try:
+                print(f"DEBUG: पृष्ठ {page_index_for_log} पर page.get_drawings() का उपयोग करने का प्रयास किया जा रहा है...")
+                drawings = page.get_drawings()
+                if drawings:
+                    print(f"DEBUG: पृष्ठ {page_index_for_log} पर {len(drawings)} चित्र (drawings) मिले।")
+                    for i, drawing_path in enumerate(drawings):
+                        try:
+                            # चित्र को पिक्समैप में बदलें
+                            # rect = drawing_path.rect # चित्र का बाउंडिंग बॉक्स
+                            # यदि drawing_path में rect एट्रिब्यूट नहीं है, तो पृष्ठ के क्लिप बाउंड का उपयोग करें
+                            rect = drawing_path.get("rect", page.rect) if isinstance(drawing_path, dict) else drawing_path.rect
+
+                            # DPI को समायोजित करके छवि की गुणवत्ता में सुधार किया जा सकता है
+                            zoom_matrix = fitz.Matrix(2.0, 2.0) # 2x ज़ूम (144 DPI)
+                            pix = page.get_pixmap(matrix=zoom_matrix, clip=rect)
+                            
+                            image_extraction_counter += 1
+                            image_filename = f"page_{page_index_for_log}_drawing_{i+1}_gidx_{image_extraction_counter}.png" # हमेशा PNG के रूप में सहेजें
+                            local_image_path = os.path.join(output_images_folder, image_filename)
+                            
+                            pix.save(local_image_path)
+                            print(f"DEBUG: पृष्ठ {page_index_for_log} से चित्र को सहेजा गया: {local_image_path}")
+
+                            alt_text = f"Drawing {i+1} from page {page_index_for_log}" # प्लेसहोल्डर ऑल्ट टेक्स्ट
+                            if gemini_client and vision_model_name_param:
+                                alt_text = generate_alt_text_for_local_image(gemini_client, vision_model_name_param, local_image_path, target_languages)
+                            
+                            html_relative_path = os.path.join(HTML_IMAGE_SUBFOLDER, image_filename)
+                            images_data.append({
+                                "pdf_page_num": page_index_for_log,
+                                "image_index_on_page": i + 1, # यह अब पृष्ठ पर चित्र का सूचकांक है
+                                "html_src_path": html_relative_path,
+                                "alt_text": alt_text,
+                                "extraction_method": "drawing_to_pixmap" # निष्कर्षण विधि को ट्रैक करें
+                            })
+                        except Exception as e_drawing:
+                            print(f"DEBUG: पृष्ठ {page_index_for_log} पर चित्र {i+1} को संसाधित करने में त्रुटि: {e_drawing}")
+                else:
+                    print(f"DEBUG: पृष्ठ {page_index_for_log} पर कोई चित्र (drawings) नहीं मिला।")
+            except Exception as e_get_drawings:
+                print(f"DEBUG: पृष्ठ {page_index_for_log} से get_drawings() में त्रुटि: {e_get_drawings}")
+            continue # image_list खाली होने पर अगले पृष्ठ पर जाएँ
+
+        page_image_index = 0
+        for img_info in image_list:
+            xref = img_info[0]
+            print(f"DEBUG: पृष्ठ {page_index_for_log}, छवि xref: {xref}") # डिबग
+            base_image = None
+            try:
+                base_image = doc.extract_image(xref)
+            except Exception as e_extract:
+                print(f"DEBUG: xref {xref} निकालने में त्रुटि: {e_extract}")
+                continue # अगली छवि पर जाएँ
+
+            if not base_image or not base_image.get("image"):
+                print(f"DEBUG: पृष्ठ {page_index_for_log} पर xref {xref} के लिए छवि डेटा नहीं निकाला जा सका (base_image खाली है)।")
+                continue
+
+            image_bytes = base_image["image"]
+            image_ext = base_image.get("ext", "png")
+
+            if image_ext == "jp2":
+                try:
+                    from io import BytesIO # सुनिश्चित करें कि यह आयातित है
+                    temp_img = Image.open(BytesIO(image_bytes))
+                    output_bytes_io = BytesIO()
+                    temp_img.save(output_bytes_io, format="PNG")
+                    image_bytes = output_bytes_io.getvalue()
+                    image_ext = "png"
+                    print(f"DEBUG: xref {xref} (JP2) को PNG में परिवर्तित किया गया।")
+                except Exception as e_conv:
+                    print(f"DEBUG: xref {xref} (JP2) को परिवर्तित करने में त्रुटि: {e_conv}")
+            
+            image_extraction_counter += 1
+            page_image_index += 1
+
+            image_filename = f"page_{page_index_for_log}_img_{page_image_index}_gidx_{image_extraction_counter}.{image_ext}"
+            local_image_path = os.path.join(output_images_folder, image_filename)
+
+            try:
+                with open(local_image_path, "wb") as img_file:
+                    img_file.write(image_bytes)
+                print(f"DEBUG: छवि सहेजी गई: {local_image_path}")
+            except Exception as e_save:
+                print(f"DEBUG: छवि सहेजने में त्रुटि ({local_image_path}): {e_save}")
+                continue
+
+            alt_text = f"Image {page_image_index} from page {page_index_for_log}" # प्लेसहोल्डर
+            if gemini_client and vision_model_name_param:
+                try:
+                    alt_text = generate_alt_text_for_local_image(gemini_client, vision_model_name_param, local_image_path, target_languages)
+                except Exception as e_alt_text:
+                    print(f"DEBUG: ऑल्ट टेक्स्ट जनरेशन में त्रुटि ({local_image_path}): {e_alt_text}")
+            
+            html_relative_path = os.path.join(HTML_IMAGE_SUBFOLDER, image_filename)
+
+            images_data.append({
+                "pdf_page_num": page_index_for_log,
+                "image_index_on_page": page_image_index,
+                "html_src_path": html_relative_path,
+                "alt_text": alt_text,
+                "extraction_method": "get_images" # निष्कर्षण विधि को ट्रैक करें
+            })
+            print(f"निकाला गया (get_images): {local_image_path} (पृष्ठ: {page_index_for_log}, पृष्ठ पर सूचकांक: {page_image_index}), ऑल्ट: '{alt_text}'")
+    
+    if doc: # सुनिश्चित करें कि doc बंद करने से पहले मौजूद है
+        try:
+            doc.close()
+        except Exception as e_close:
+            print(f"DEBUG: PDF बंद करने में त्रुटि: {e_close}")
+            
+    print(f"DEBUG: extract_images_and_generate_alt_tags फ़ंक्शन समाप्त, कुल {len(images_data)} छवियां निकाली गईं।") # डिबग
+    return images_data
 
 def extract_images_and_generate_alt_tags(gemini_client, vision_model_name_param, pdf_path, output_images_folder, target_languages):
     if not os.path.exists(pdf_path):
